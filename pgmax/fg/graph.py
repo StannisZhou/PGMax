@@ -45,7 +45,8 @@ class FactorGraph:
     """
 
     variables: Union[
-        Mapping[Hashable, groups.VariableGroup],
+        Mapping[int, groups.VariableGroup],
+        Mapping[str, groups.VariableGroup],
         Sequence[groups.VariableGroup],
         groups.VariableGroup,
     ]

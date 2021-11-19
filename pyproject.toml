@@ -23,6 +23,7 @@ numpy = "^1.19.0"
 scipy = "^1.2.3"
 jupytext = "^1.11.3"
 tqdm = "^4.61.0"
+scikit-learn = "^1.0.1"
 
 [tool.poetry.dev-dependencies]
 pytest = "^5.2"

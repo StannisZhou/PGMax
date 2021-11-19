@@ -48,6 +48,7 @@ class FactorGraph:
         Mapping[Hashable, groups.VariableGroup],
         Sequence[groups.VariableGroup],
         groups.VariableGroup,
+        Mapping[int, groups.NDVariableArray],
     ]
 
     def __post_init__(self):

@@ -14,15 +14,12 @@
 # ---
 
 # %%
+# %matplotlib inline
 import os
 import time
 from typing import Dict
 
 import jax
-import matplotlib.pyplot as plt
-
-# %%
-# %matplotlib inline
 import numpy as np
 from jax import numpy as jnp
 from jax import tree_util
@@ -40,7 +37,7 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 # %%
 hps, vps = 12, 12
 train_size = 20
-test_size = 20
+test_size = 2
 
 
 def fetch_mnist_dataset(train_size: int, test_size: int, seed: int = 5):
@@ -113,64 +110,24 @@ train_set, train_labels, test_set, test_labels = fetch_mnist_dataset(
 
 # %%
 data = np.load("example_data/rcn.npz", allow_pickle=True, encoding="latin1")
-frcs, edges, suppression_masks, filters = (
-    data["frcs"],
-    data["edges"],
+frcs = np.load(
+    "/storage/users/skushagra/pgmax_rcn_artifacts/model_science_1000_12_12/all_frcs.npy",
+    allow_pickle=True,
+    encoding="latin1",
+)
+edges = np.load(
+    "/storage/users/skushagra/pgmax_rcn_artifacts/model_science_1000_12_12/all_edges.npy",
+    allow_pickle=True,
+    encoding="latin1",
+)
+suppression_masks, filters = (
     data["suppression_masks"],
     data["filters"],
 )
 
-M = (2 * hps + 1) * (2 * vps + 1) + 1
-
-# %% [markdown]
-# # 3. Visualize loaded model
-
-# %%
-img = np.zeros((200, 200))
-
-frc, edge = frcs[4], edges[4]
-plt.figure(figsize=(10, 10))
-for e in edge:
-    i1, i2, w = e
-    f1, r1, c1 = frc[i1]
-    f2, r2, c2 = frc[i2]
-
-    img[r1, c1] = 255
-    img[r2, c2] = 255
-    plt.text((c1 + c2) // 2, (r1 + r2) // 2, str(w), color="blue")
-    plt.plot([c1, c2], [r1, r2], color="blue", linewidth=0.5)
-
-plt.imshow(img, cmap="gray")
+M = (2 * hps + 1) * (2 * vps + 1)
 
 
-# %% [markdown]
-# # 3. Make pgmax graph
-
-# %% [markdown]
-# ## 3.1 Make variables
-
-# %%
-start = time.time()
-assert frcs.shape[0] == edges.shape[0]
-
-variables_all_models = {}
-for idx in range(frcs.shape[0]):
-    frc = frcs[idx]
-    variables_all_models[idx] = groups.NDVariableArray(
-        variable_size=M, shape=(frc.shape[0],)
-    )
-
-end = time.time()
-print(f"Creating variables took {end-start:.3f} seconds.")
-
-
-# %% [markdown]
-# ## 3.2 Make factors
-
-# %% [markdown]
-# ### 3.2.1 Pre-compute the valid configs for different perturb radii.
-
-# %%
 def valid_configs(r: int) -> np.ndarray:
     """Returns the valid configurations for the potential matrix given the perturb radius.
     Args:
@@ -206,25 +163,32 @@ for r in range(max_perturb_radii):
     phi_r = valid_configs(r)
     phis.append(phi_r)
 
-# %% [markdown]
-# ### 3.2.2 Make the factor graph
 
-# %%
-start = end
-fg = graph.FactorGraph(variables=variables_all_models)
-for idx in range(edges.shape[0]):
-    edge = edges[idx]
-
-    for e in edge:
-        i1, i2, r = e
-        fg.add_factor(
-            [(idx, i1), (idx, i2)],
-            phis[r],
-            np.zeros(phis[r].shape[0]),
+def get_pgmax_model(frcs, edges, phis):
+    start = time.time()
+    assert frcs.shape[0] == edges.shape[0]
+    variables_all_models = {}
+    for idx in range(frcs.shape[0]):
+        frc = frcs[idx]
+        variables_all_models[idx] = groups.NDVariableArray(
+            variable_size=M, shape=(frc.shape[0],)
         )
 
-end = time.time()
-print(f"Creating factors took {end-start:.3f} seconds.")
+    end = time.time()
+    print(f"Creating variables took {end-start:.3f} seconds.")
+    start = end
+    fg = graph.FactorGraph(variables=variables_all_models)
+    for idx in range(edges.shape[0]):
+        edge = edges[idx]
+        for e in edge:
+            i1, i2, r = e
+            fg.add_factor(
+                [(idx, i1), (idx, i2)],
+                phis[r],
+            )
+
+    end = time.time()
+    print(f"Creating factors took {end-start:.3f} seconds.")
 
 
 # %% [markdown]
@@ -234,7 +198,7 @@ print(f"Creating factors took {end-start:.3f} seconds.")
 # ## 4.1 Helper functions to initialize the evidence for a given image
 
 # %%
-def get_bu_msg(img: np.ndarray) -> np.ndarray:
+def preproc(img: np.ndarray) -> np.ndarray:
     """Computes the bottom-up messages given a test image.
     Args:
         img: The rgb image to compute bottom up messages on (H x W x 3).
@@ -285,7 +249,7 @@ def initialize_evidences(test_img: np.ndarray) -> Dict:
         evidence_updates: A dictionary containing the initial messages to all the variables in the factor graph.
     """
 
-    bu_msg = get_bu_msg(test_img)
+    bu_msg = preproc(test_img)
 
     evidence_updates = {}
     for idx in range(frcs.shape[0]):
@@ -312,81 +276,47 @@ def initialize_evidences(test_img: np.ndarray) -> Dict:
 # ## 4.2 Run map product inference on all test images
 
 # %%
-run_bp_fn, _, get_beliefs_fn = graph.BP(fg.bp_state, 30)
-scores = np.zeros((len(test_set), frcs.shape[0]))
-map_states_dict = {}
-
-for test_idx in range(len(test_set)):
-    img = test_set[test_idx]
-
-    start = time.time()
-    evidence_updates = initialize_evidences(img)
-    end = time.time()
-    print(f"Initializing evidences took {end-start:.3f} seconds for image {test_idx}.")
-
-    start = end
-    map_states = graph.decode_map_states(
-        get_beliefs_fn(run_bp_fn(evidence_updates=evidence_updates))
+batch_size = 50
+for ii in range(frcs.shape[0] // batch_size):
+    fg = get_pgmax_model(
+        frcs[batch_size * ii : batch_size * (ii + 1)],
+        edges[batch_size * ii : batch_size * (ii + 1)],
+        phis,
     )
-    end = time.time()
-    print(f"Max product inference took {end-start:.3f} seconds for image {test_idx}.")
+    run_bp_fn, _, get_beliefs_fn = graph.BP(fg.bp_state, 30)
+    scores = np.zeros((len(test_set), frcs.shape[0]))
+    map_states_dict = {}
+    for test_idx in range(len(test_set)):
+        img = test_set[test_idx]
 
-    map_states_dict[test_idx] = map_states
-    start = end
-    score = tree_util.tree_multimap(
-        lambda evidence, map: jnp.sum(evidence[jnp.arange(map.shape[0]), map]),
-        evidence_updates,
-        map_states,
-    )
-    for ii in score:
-        scores[test_idx, ii] = score[ii]
-    end = time.time()
-    print(f"Computing scores took {end-start:.3f} seconds for image {test_idx}.")
+        start = time.time()
+        evidence_updates = initialize_evidences(img)
+        end = time.time()
+        print(
+            f"Initializing evidences took {end-start:.3f} seconds for image {test_idx}."
+        )
 
+        start = end
+        map_states = graph.decode_map_states(
+            get_beliefs_fn(run_bp_fn(evidence_updates=evidence_updates))
+        )
+        end = time.time()
+        print(
+            f"Max product inference took {end-start:.3f} seconds for image {test_idx}."
+        )
 
-# %% [markdown]
-# # 5. Compute metrics (accuracy)
+        map_states_dict[test_idx] = map_states
+        start = end
+        score = tree_util.tree_multimap(
+            lambda evidence, map: jnp.sum(evidence[jnp.arange(map.shape[0]), map]),
+            evidence_updates,
+            map_states,
+        )
+        for ii in score:
+            scores[test_idx, ii] = score[ii]
+        end = time.time()
+        print(f"Computing scores took {end-start:.3f} seconds for image {test_idx}.")
 
-# %%
-test_preds = train_labels[scores.argmax(axis=1)]
-accuracy = (test_preds == test_labels).sum() / test_labels.shape[0]
-
-print(f"accuracy = {accuracy}")
-
-
-# %% [markdown]
-# # 6. Visualize predictions
-
-# %%
-test_idx = 0
-plt.imshow(test_set[test_idx], cmap="gray")
-
-
-# %% [markdown]
-# ## 6.1 Backtrace of some models on this test image
-
-
-# %%
-map_states = map_states_dict[test_idx]
-imgs = np.ones((len(frcs), 200, 200))
-
-for i in range(frcs.shape[0]):
-    map_state = map_states[i]
-    frc = frcs[i]
-
-    for v in range(frc.shape[0]):
-        idx = map_state[v]
-        f, r, c = frc[v]
-
-        delta_r, delta_c = -hps + idx // (2 * vps + 1), -vps + idx % (2 * vps + 1)
-        rd, cd = r + delta_r, c + delta_c
-        imgs[i, rd, cd] = 0
-plt.figure(figsize=(15, 15))
-
-for k, index in enumerate(range(0, len(train_set), 5)):
-    plt.subplot(1, 4, 1 + k)
-    plt.title(f" Model {int(train_labels[index])}")
-    plt.imshow(imgs[index, :, :], cmap="gray")
-
-
-# %%
+    test_preds = train_labels[scores.argmax(axis=1)]
+    accuracy = (test_preds == test_labels).sum() / test_labels.shape[0]
+    print(f"accuracy = {accuracy}")
